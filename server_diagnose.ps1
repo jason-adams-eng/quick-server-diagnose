@@ -1,87 +1,136 @@
-# Define the server name
-$ServerName = "server-name" # Change accordingly
+# ==============================
+# Windows Server Spot-Check Script
+# PowerShell 5.1+ | Exports to CSV
+# Author: Jason Adams
+# ==============================
 
-# Create an empty report to store the results
-$Report = @{}
+$ServerListFile = ".\servers.txt"
+$ServiceNames = @('w32time', 'WinRM', 'EventLog', 'W3SVC') # Add/edit as needed
 
-# Check CPU Usage
-$cpuUsage = Get-WmiObject -ComputerName $ServerName -Class Win32_Processor | 
-    Measure-Object -Property LoadPercentage -Average | Select-Object -ExpandProperty Average
-$Report.CPUUsage = "$cpuUsage% CPU Load"
-
-# Check Memory Usage
-$memory = Get-WmiObject -ComputerName $ServerName -Class Win32_OperatingSystem
-$totalMemory = [math]::Round($memory.TotalVisibleMemorySize / 1MB, 2)
-$freeMemory = [math]::Round($memory.FreePhysicalMemory / 1MB, 2)
-$usedMemory = $totalMemory - $freeMemory
-$Report.MemoryUsage = "$usedMemory GB used out of $totalMemory GB"
-
-# Check Disk Space
-$diskSpace = Get-WmiObject -ComputerName $ServerName -Class Win32_LogicalDisk -Filter "DriveType = 3"
-$diskReport = @()
-foreach ($disk in $diskSpace) {
-    $freeSpaceGB = [math]::Round($disk.FreeSpace / 1GB, 2)
-    $totalSpaceGB = [math]::Round($disk.Size / 1GB, 2)
-    $diskReport += "Drive $($disk.DeviceID): $freeSpaceGB GB free out of $totalSpaceGB GB"
-}
-$Report.DiskSpace = $diskReport -join "`n"
-
-# Check for recent Errors and Critical events in the Event Log, handle empty results
-$events = Get-WinEvent -ComputerName $ServerName -FilterHashtable @{LogName="System"; Level=1,2; StartTime=(Get-Date).AddDays(-7)} |
-    Select-Object TimeCreated, Id, Message
-
-if ($events.Count -eq 0) {
-    $Report.EventLogs = "No critical or error events found in the last 7 days"
+# Get server list (from file or prompt)
+if (Test-Path $ServerListFile) {
+    $ServerNames = Get-Content $ServerListFile | Where-Object { $_ -and $_.Trim() -ne "" }
+    if (-not $ServerNames) { Write-Host "No servers found in $ServerListFile. Exiting." -ForegroundColor Red; exit 1 }
 } else {
-    # Group by unique messages and count occurrences
-    $groupedEvents = $events | Group-Object -Property Message | Select-Object Name, Count
+    $ServerNames = @(Read-Host "Enter the server name to check")
+}
 
-    # Store the grouped results in a more readable format
-    $eventReport = @()
-    foreach ($event in $groupedEvents) {
-        $eventReport += "$($event.Count) occurrence(s) of: $($event.Name)"
+$Results = @()
+
+foreach ($Server in $ServerNames) {
+    Write-Host "Checking $Server..." -ForegroundColor Cyan
+    $Result = [ordered]@{
+        ServerName     = $Server
+        Ping           = ''
+        UptimeDays     = ''
+        CPUUsage       = ''
+        MemoryUsage    = ''
+        DiskSpace      = ''
+        Services       = ''
+        SysErrors      = ''
+        AppErrors      = ''
+        IISAppPools    = ''
+        IISSites       = ''
+        HTTPPorts      = ''
+        Status         = 'OK'
+        Error          = ''
     }
+    try {
+        # 1. Ping test
+        $Result.Ping = if (Test-Connection -ComputerName $Server -Count 1 -Quiet) { "OK" } else { "Unreachable" }
+        if ($Result.Ping -eq "Unreachable") { throw "Ping failed" }
 
-    $Report.EventLogs = $eventReport -join "`n`n"
+        # 2. Uptime (Last Boot Time)
+        $os = Get-CimInstance -ComputerName $Server -ClassName Win32_OperatingSystem -ErrorAction Stop
+        $lastBoot = [Management.ManagementDateTimeConverter]::ToDateTime($os.LastBootUpTime)
+        $uptime = (Get-Date) - $lastBoot
+        $Result.UptimeDays = [math]::Round($uptime.TotalDays,1)
+
+        # 3. CPU
+        $cpu = Get-CimInstance -ComputerName $Server -ClassName Win32_Processor -ErrorAction Stop
+        $cpuUsage = ($cpu | Measure-Object -Property LoadPercentage -Average).Average
+        $Result.CPUUsage = "$cpuUsage%"
+
+        # 4. Memory
+        $totalMemGB = [math]::Round($os.TotalVisibleMemorySize / 1MB / 1024, 2)
+        $freeMemGB  = [math]::Round($os.FreePhysicalMemory / 1MB / 1024, 2)
+        $usedMemGB  = $totalMemGB - $freeMemGB
+        $Result.MemoryUsage = "$usedMemGB GB used / $totalMemGB GB"
+
+        # 5. Disk Space
+        $disks = Get-CimInstance -ComputerName $Server -ClassName Win32_LogicalDisk -Filter "DriveType=3" -ErrorAction Stop
+        $diskSummary = $disks | ForEach-Object {
+            $free = [math]::Round($_.FreeSpace / 1GB, 2)
+            $total = [math]::Round($_.Size / 1GB, 2)
+            "$($_.DeviceID): $free GB free / $total GB"
+        }
+        $Result.DiskSpace = $diskSummary -join "; "
+
+        # 6. Key Services
+        $Result.Services = ($ServiceNames | ForEach-Object {
+            try {
+                $svc = Get-Service -ComputerName $Server -Name $_ -ErrorAction Stop
+                "$($_): $($svc.Status)"
+            } catch {
+                "$($_): Not found"
+            }
+        }) -join "; "
+
+        # 7. Recent Errors (last 7 days) in System & Application
+        $since = (Get-Date).AddDays(-7)
+        foreach ($log in @("System","Application")) {
+            $errors = Get-WinEvent -ComputerName $Server -FilterHashtable @{LogName=$log; Level=1,2; StartTime=$since} -ErrorAction SilentlyContinue |
+                Select-Object -First 5 -Property TimeCreated, Id, Message
+            $report = if ($errors) {
+                $errors | ForEach-Object { "$($_.TimeCreated): $($_.Id) $($_.Message -replace "`r`n", " " -replace "`n", " " )" }
+            } else {
+                "None"
+            }
+            if ($log -eq "System")   { $Result.SysErrors = $report -join " || " }
+            if ($log -eq "Application") { $Result.AppErrors = $report -join " || " }
+        }
+
+        # 8. IIS Checks (if IIS is present)
+        $iisInfo = Invoke-Command -ComputerName $Server -ScriptBlock {
+            try {
+                Import-Module WebAdministration -ErrorAction Stop
+                $appPools = Get-ChildItem IIS:\AppPools | Select-Object Name, State
+                $sites = Get-ChildItem IIS:\Sites | Select-Object Name, State, Bindings
+                return @{
+                    AppPools = $appPools
+                    Sites    = $sites
+                }
+            } catch {
+                return $null
+            }
+        } -ErrorAction SilentlyContinue
+
+        if ($iisInfo) {
+            # App Pools
+            $Result.IISAppPools = $iisInfo.AppPools | ForEach-Object { "$($_.Name): $($_.State)" } -join "; "
+            # Sites
+            $Result.IISSites = $iisInfo.Sites | ForEach-Object { "$($_.Name): $($_.State)" } -join "; "
+        }
+
+        # 9. HTTP/HTTPS Ports Listening
+        $ports = Invoke-Command -ComputerName $Server -ScriptBlock {
+            netstat -an | findstr ":80 " | findstr "LISTENING"
+            netstat -an | findstr ":443" | findstr "LISTENING"
+        } -ErrorAction SilentlyContinue
+        if ($ports) { $Result.HTTPPorts = ($ports | Out-String).Trim() } else { $Result.HTTPPorts = "Not listening" }
+
+    } catch {
+        $Result.Status = "Error"
+        $Result.Error = $_.Exception.Message
+        Write-Host ('Failed to check {0}: {1}' -f $Server, $_.Exception.Message) -ForegroundColor Red
+    }
+    $Results += [pscustomobject]$Result
 }
 
-# Check Pagefile Usage
-$pagefile = Get-WmiObject -ComputerName $ServerName -Class Win32_PageFileUsage
-if ($pagefile) {
-    $pagefileUsage = [math]::Round($pagefile.CurrentUsage / 1MB, 2)
-    $pagefileAllocated = [math]::Round($pagefile.AllocatedBaseSize / 1MB, 2)
-    $Report.PagefileUsage = "$pagefileUsage GB used out of $pagefileAllocated GB allocated"
-} else {
-    $Report.PagefileUsage = "Pagefile data unavailable"
-}
+# Output to screen
+$Results | Format-Table -AutoSize
 
-# Check for Memory Dumps in the last 7 days
-$sevenDaysAgo = (Get-Date).AddDays(-7)
-$memoryDumps = Get-ChildItem "\\$ServerName\C$\Windows\minidump" -ErrorAction SilentlyContinue | 
-               Where-Object { $_.LastWriteTime -ge $sevenDaysAgo }
-
-if ($memoryDumps) {
-    # Create a list of dumps found in the last 7 days
-    $dumpList = $memoryDumps | ForEach-Object { $_.Name + " - Last modified: " + $_.LastWriteTime }
-    $Report.MemoryDumps = "Memory dump(s) found in C:\Windows\minidump: `n$($dumpList -join "`n")"
-} else {
-    $Report.MemoryDumps = "No memory dumps found in the last 7 days"
-}
-
-# Output the Report with enhanced formatting
-Write-Host "Diagnostics Report for $ServerName`n"
-
-Write-Host "PagefileUsage: $($Report.PagefileUsage)`n"
-Write-Host "MemoryDumps: $($Report.MemoryDumps)`n"
-Write-Host "MemoryUsage: $($Report.MemoryUsage)`n"
-
-Write-Host "CPUUsage: $($Report.CPUUsage)`n"
-
-Write-Host "DiskSpace: `n$($Report.DiskSpace)`n"
-
-Write-Host "EventLogs: `n$($Report.EventLogs)`n"
-
-# Optionally export the report to a text file
-#$Report | Out-File -FilePath "C:\Users\da.jason.adams\Desktop\$ServerName-Report.txt"
-# Output the Report as a readable string and write it to a text file
-$Report | Format-List | Out-String | Out-File -FilePath "C:\Users\da.jason.adams\Desktop\$ServerName-Report.txt"
+# Export to CSV
+$csvPath = ".\ServerHealthReport.csv"
+$Results | Export-Csv -Path $csvPath -NoTypeInformation -Force
+Write-Host "Results exported to $csvPath" -ForegroundColor Green
