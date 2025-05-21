@@ -1,5 +1,11 @@
 # Windows Server Spot-Check Script
 
+![PowerShell](https://img.shields.io/badge/language-PowerShell-5391FE?logo=powershell&logoColor=white)
+
+![PowerShell Lint](https://github.com/jason-adams-eng/ADUserGUI/actions/workflows/lint.yml/badge.svg)
+
+![Markdown Lint](https://github.com/jason-adams-eng/ADUserGUI/actions/workflows/mdlint.yml/badge.svg)
+
 This PowerShell script provides a quick health summary for one or more Windows servers. It collects key diagnostics and exports results to a CSV file for easy review.
 
 ## Features

@@ -1,0 +1,16 @@
+```gitignore
+# Ignore VSCode settings
+.vscode/
+
+# Ignore backup and temp files
+*.bak
+*.tmp
+*.log
+
+# Ignore compiled PowerShell data (if used)
+*.psd1
+*.psm1
+
+# Ignore Windows-specific junk
+Thumbs.db
+Desktop.ini
