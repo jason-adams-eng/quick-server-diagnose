@@ -42,10 +42,24 @@ foreach ($Server in $ServerNames) {
 
         # 2. Uptime (Last Boot Time)
         $os = Get-CimInstance -ComputerName $Server -ClassName Win32_OperatingSystem -ErrorAction Stop
-        $lastBoot = [Management.ManagementDateTimeConverter]::ToDateTime($os.LastBootUpTime)
-        $uptime = (Get-Date) - $lastBoot
-        $Result.UptimeDays = [math]::Round($uptime.TotalDays,1)
-
+        $lastBootRaw = $os.LastBootUpTime
+        Write-Host "DEBUG: $Server LastBootUpTime raw value: $lastBootRaw"
+        
+        # Check: Not null, not empty, looks like a DMTF datetime (should be 25+ chars, all digits or '.')
+        if ($null -eq $lastBootRaw -or [string]::IsNullOrWhiteSpace($lastBootRaw)) {
+            throw "Unable to retrieve valid LastBootUpTime (Value: '$lastBootRaw')"
+        }
+        try {
+            # Try parsing as [datetime] directly
+            $lastBoot = [datetime]::Parse($lastBootRaw)
+            $uptime = (Get-Date) - $lastBoot
+            $Result.UptimeDays = [math]::Round($uptime.TotalDays,1)
+        } catch {
+            # As a last resort, mark as unavailable
+            $Result.UptimeDays = "Unavailable"
+            Write-Host "Warning: Could not parse LastBootUpTime for $Server (Value: '$lastBootRaw')" -ForegroundColor Yellow
+        }        
+        
         # 3. CPU
         $cpu = Get-CimInstance -ComputerName $Server -ClassName Win32_Processor -ErrorAction Stop
         $cpuUsage = ($cpu | Measure-Object -Property LoadPercentage -Average).Average
