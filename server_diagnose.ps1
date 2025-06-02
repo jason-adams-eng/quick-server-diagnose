@@ -45,17 +45,14 @@ foreach ($Server in $ServerNames) {
         $lastBootRaw = $os.LastBootUpTime
         Write-Host "DEBUG: $Server LastBootUpTime raw value: $lastBootRaw"
         
-        # Check: Not null, not empty, looks like a DMTF datetime (should be 25+ chars, all digits or '.')
         if ($null -eq $lastBootRaw -or [string]::IsNullOrWhiteSpace($lastBootRaw)) {
             throw "Unable to retrieve valid LastBootUpTime (Value: '$lastBootRaw')"
         }
         try {
-            # Try parsing as [datetime] directly
             $lastBoot = [datetime]::Parse($lastBootRaw)
             $uptime = (Get-Date) - $lastBoot
             $Result.UptimeDays = [math]::Round($uptime.TotalDays,1)
         } catch {
-            # As a last resort, mark as unavailable
             $Result.UptimeDays = "Unavailable"
             Write-Host "Warning: Could not parse LastBootUpTime for $Server (Value: '$lastBootRaw')" -ForegroundColor Yellow
         }        
@@ -73,11 +70,11 @@ foreach ($Server in $ServerNames) {
 
         # 5. Disk Space
         $disks = Get-CimInstance -ComputerName $Server -ClassName Win32_LogicalDisk -Filter "DriveType=3" -ErrorAction Stop
-        $diskSummary = $disks | ForEach-Object {
+        $diskSummary = ($disks | ForEach-Object {
             $free = [math]::Round($_.FreeSpace / 1GB, 2)
             $total = [math]::Round($_.Size / 1GB, 2)
             "$($_.DeviceID): $free GB free / $total GB"
-        }
+        })
         $Result.DiskSpace = $diskSummary -join "; "
 
         # 6. Key Services
@@ -96,12 +93,12 @@ foreach ($Server in $ServerNames) {
             $errors = Get-WinEvent -ComputerName $Server -FilterHashtable @{LogName=$log; Level=1,2; StartTime=$since} -ErrorAction SilentlyContinue |
                 Select-Object -First 5 -Property TimeCreated, Id, Message
             $report = if ($errors) {
-                $errors | ForEach-Object { "$($_.TimeCreated): $($_.Id) $($_.Message -replace "`r`n", " " -replace "`n", " " )" }
+                ($errors | ForEach-Object { "$($_.TimeCreated): $($_.Id) $($_.Message -replace "`r`n", " " -replace "`n", " " )" })
             } else {
-                "None"
+                @("None")
             }
-            if ($log -eq "System")   { $Result.SysErrors = $report -join " || " }
-            if ($log -eq "Application") { $Result.AppErrors = $report -join " || " }
+            if ($log -eq "System")     { $Result.SysErrors = $report -join " || " }
+            if ($log -eq "Application"){ $Result.AppErrors = $report -join " || " }
         }
 
         # 8. IIS Checks (if IIS is present)
@@ -120,10 +117,8 @@ foreach ($Server in $ServerNames) {
         } -ErrorAction SilentlyContinue
 
         if ($iisInfo) {
-            # App Pools
-            $Result.IISAppPools = $iisInfo.AppPools | ForEach-Object { "$($_.Name): $($_.State)" } -join "; "
-            # Sites
-            $Result.IISSites = $iisInfo.Sites | ForEach-Object { "$($_.Name): $($_.State)" } -join "; "
+            $Result.IISAppPools = ($iisInfo.AppPools | ForEach-Object { "$($_.Name): $($_.State)" }) -join "; "
+            $Result.IISSites    = ($iisInfo.Sites    | ForEach-Object { "$($_.Name): $($_.State)" }) -join "; "
         }
 
         # 9. HTTP/HTTPS Ports Listening
@@ -131,7 +126,11 @@ foreach ($Server in $ServerNames) {
             netstat -an | findstr ":80 " | findstr "LISTENING"
             netstat -an | findstr ":443" | findstr "LISTENING"
         } -ErrorAction SilentlyContinue
-        if ($ports) { $Result.HTTPPorts = ($ports | Out-String).Trim() } else { $Result.HTTPPorts = "Not listening" }
+        if ($ports) {
+            $Result.HTTPPorts = ($ports | Out-String).Trim()
+        } else {
+            $Result.HTTPPorts = "Not listening"
+        }
 
     } catch {
         $Result.Status = "Error"
